@@ -1,0 +1,226 @@
+# -*- coding: utf-8 -*-
+
+# PartToVRMLsbc.FCMacro
+# Originally based on PartToVRML.FCMacro version 1.9.2
+
+# Exports a VRML model of selected object(s), making one Shape for each colour ("PartToVRML shape by colour")
+# Create the object (e.g. using Part) then use "Set Colors.." to group together all faces that should be in
+# each VRML Shape element. You can use Material colours too, and rotate to Z-forward/Y-up if required.
+# See the Report view for any messages when running the macro
+
+__title__ = "PartToVRMLsbc"
+__author__ = "Graham ONeill, easyw-fc, hyOzd"
+__url__     = "http://www.freecadweb.org/"
+__version__ = "1.0.0"
+__date__    = "25/07/2019"
+
+__Comment__ = "This macro creates VRML model of selected object(s) using the colors (for Kicad, Blender and RoomArranger compatibility)"
+__Web__ = "http://www.freecadweb.org/"
+__Wiki__ = "http://www.freecadweb.org/wiki/index.php?title=Macro_PartToVRML"
+__Icon__  = "/usr/lib/freecad/Mod/plugins/icons/Macro_PartToVRML.png"
+__IconW__  = "C:/Users/User Name/AppData/Roaming/FreeCAD/Macro_PartToVRML.png"
+__Help__ = "start the macro and follow the instructions"
+__Status__ = "stable"
+__Requires__ = "Freecad"
+
+# FreeCAD VRML python exporter is free software: you can redistribute it
+# and/or modify it under the terms of the GNU General Public License
+# as published by the Free Software Foundation, either version 3 of
+# the License, or (at your option) any later version.
+#
+# This software is distributed in the hope that it will be
+# useful, but WITHOUT ANY WARRANTY; without even the implied warranty
+# of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with PartToVRMLsbc.FCMacro. If not, see
+# <http://www.gnu.org/licenses/>.
+
+import FreeCAD,FreeCADGui,Part,Mesh
+import PySide
+from PySide import QtGui, QtCore
+from collections import namedtuple
+import sys, os, math
+from os.path import expanduser
+
+ColorSet = namedtuple('ColorSet', ['diffuse', 'emissive', 'specular', 'ambient', 'intensity', 'shininess', 'transparency'])
+Mesh = namedtuple('Mesh', ['points', 'faces', 'colorset'])
+ColorIndex = namedtuple('ColorIndex', ['colorset', 'meshlist'])
+FileParam = namedtuple('FileParam', ['scale', 'decplc', 'zforward', 'filename'])
+Bounds = namedtuple('Bounds', ['mn', 'mx'])
+
+
+# Set default values
+dflt_path = expanduser("~")
+#dflt_path = 'D:\Data\FreeCAD'   #alternative: set to required path on your machine
+dflt_deviation=0.03              #the smaller the best quality, 1 coarse; 0.03 good compromise
+
+def say(msg):
+    FreeCAD.Console.PrintMessage(msg+"\n")
+
+def faceToMesh(face, facecolors):
+    mesh_data = face.tessellate(dflt_deviation)
+    points = mesh_data[0]
+    newMesh = Mesh(points = points, faces = mesh_data[1], colorset = facecolors)
+    return newMesh
+
+def valToStr(val, dec):
+    fmt = '%.'+str(dec)+'f'
+    ret=(fmt % val).rstrip('0').rstrip('.')
+    if ret=='-0': ret='0'
+    return ret
+
+def intensity(clr):
+    # Need ambientIntensity but only have ambientColor, where ambientColor = ambientIntensity * diffuseColor 
+    # Maybe use "perceived brightness" instead:
+    pb = math.sqrt(0.299*clr[0]*clr[0] + 0.587*clr[1]*clr[1] + 0.114*clr[2]*clr[2])
+    return pb
+
+def minmax(p, bnd):
+    for i in range(3):
+        if bnd.mn[i]==None or p[i]<bnd.mn[i]: bnd.mn[i] = p[i]
+        if bnd.mx[i]==None or p[i]>bnd.mx[i]: bnd.mx[i] = p[i]
+    return bnd
+
+
+def writeVRML(colList, mshList, filename, scale, dp, zforward):
+    with open(filename, 'w') as fil:
+        # write the standard VRML header
+        fil.write("#VRML V2.0 utf8\n")
+        fil.write("#modelled using FreeCAD https://www.freecadweb.org\n")
+        fcCnt = 0
+        objBounds = Bounds(mn = [None, None, None], mx = [None, None, None])
+        for col in colList:
+            fil.write("\nShape {\n")
+            # ----- Appearance -----
+            fil.write("\tappearance Appearance {\n\t\tmaterial Material {\n")
+            fil.write("\t\t\tdiffuseColor %f %f %f\n" % col.colorset.diffuse)
+            if col.colorset.emissive != (0.0, 0.0, 0.0):
+                fil.write("\t\t\temissiveColor %f %f %f\n" % col.colorset.emissive)
+            if col.colorset.specular != (0.0, 0.0, 0.0):
+                fil.write("\t\t\tspecularColor %f %f %f\n" % col.colorset.specular)
+            if col.colorset.intensity != 0.0:
+                fil.write("\t\t\tambientIntensity %f\n" % col.colorset.intensity)
+            fil.write("\t\t\tshininess %f\n" % col.colorset.shininess)
+            if col.colorset.transparency != 0.0:
+                fil.write("\t\t\ttransparency %f\n" % col.colorset.transparency)
+            fil.write("\t\t}\n\t}\n")
+            # ----- Geometry -----
+            ptStr = ''; ptDel = ''
+            coStr = ''; coDel = ''
+            ptTot = 0
+            for m in col.meshlist:
+                msh = mshList[m]
+                ptCnt = 0
+                for p in msh.points:
+                    if scale != 1.0: ps = p * scale
+                    else:            ps = p
+                    if zforward: 
+                        ptStr += ptDel + valToStr(-1*ps.x,dp)+' '+valToStr(ps.z,dp)+' '+valToStr(ps.y,dp)
+                    else:
+                        ptStr += ptDel + valToStr(ps.x,dp)+' '+valToStr(ps.y,dp)+' '+valToStr(ps.z,dp)
+                    ptDel = ','
+                    objBounds = minmax(ps, objBounds)
+                    ptCnt += 1
+                for f in msh.faces:
+                    coStr += coDel + ("%d" % (f[0]+ptTot))+','+("%d" % (f[1]+ptTot))+','+("%d" % (f[2]+ptTot))+',-1'
+                    coDel = ','
+                    fcCnt += 1
+                ptTot += ptCnt
+            # write coordinate points for each vertex
+            fil.write("\tgeometry IndexedFaceSet {\n\t\tcoord Coordinate { point [")
+            fil.write(ptStr)
+            fil.write("] }\n")
+            # write coordinate indexes for each face
+            fil.write("\t\tcoordIndex [")
+            fil.write(coStr)
+            fil.write("]\n\t}\n")
+            fil.write("}\n") # closes Shape
+        fil.write("\n#Tessellation value: %.2f" % dflt_deviation)
+        fil.write(" (%d faces)\n\n" % fcCnt)
+        fil.write("#Object boundaries: From (")
+        fil.write(valToStr(objBounds.mn[0],dp)+", "+valToStr(objBounds.mn[1],dp)+", "+valToStr(objBounds.mn[2],dp)+") to (")
+        fil.write(valToStr(objBounds.mx[0],dp)+", "+valToStr(objBounds.mx[1],dp)+", "+valToStr(objBounds.mx[2],dp)+")\n")
+        fil.write("#Object dimensions: ")
+        fil.write(valToStr(abs(objBounds.mx[0]-objBounds.mn[0]),dp)+" x ")
+        fil.write(valToStr(abs(objBounds.mx[1]-objBounds.mn[1]),dp)+" x ")
+        fil.write(valToStr(abs(objBounds.mx[2]-objBounds.mn[2]),dp)+"\n")
+    say(filename+' written')
+
+
+def export(selObjs, fileList):
+    # ----- Create meshes with colours -----
+    meshes=[]
+    for obj in selObjs:
+        gobj = Gui.ActiveDocument.getObject(obj.Name)
+        gmat = gobj.ShapeMaterial
+        ambInt = intensity(gmat.AmbientColor)
+        # Note: colours have 4 numbers but we only want 3 (RGB) so remove last using [:-1]
+        shapeSet = ColorSet(diffuse=gobj.ShapeColor[:-1], emissive=gmat.EmissiveColor[:-1],
+                            specular=gmat.SpecularColor[:-1], ambient=gmat.AmbientColor[:-1],
+                            intensity=ambInt, shininess=gmat.Shininess, transparency=gobj.Transparency/100.0)
+        faceColors = gobj.DiffuseColor
+        # Obj.DiffuseColor should have a colour for each face, but if not use ShapeColor on all faces
+        for i in range(len(obj.Shape.Faces)):
+            if len(faceColors) != len(obj.Shape.Faces):
+                meshes.append(faceToMesh(obj.Shape.Faces[i], shapeSet))
+            else:
+                faceSet = shapeSet._replace(diffuse=faceColors[i][:-1])
+                meshes.append(faceToMesh(obj.Shape.Faces[i], faceSet))
+    # ----- Build index of meshes by colour -----
+    colIndex=[]
+    for m in range(len(meshes)):
+        fnd=False
+        for c in range(len(colIndex)):
+            if colIndex[c].colorset==meshes[m].colorset:
+                # "colIndex[c].meshlist.append(m)" works, but probably shouldn't so instead replace colIndex[c]:
+                newlist = colIndex[c].meshlist
+                newlist.append(m)
+                colIndex[c] = ColorIndex(colorset = meshes[m].colorset, meshlist = newlist)
+                fnd=True
+                break
+        if not fnd:
+            colIndex.append(ColorIndex(colorset = meshes[m].colorset, meshlist = [m]))
+    # ----- Use colour index and meshes to output files -----
+    for f in fileList:
+        writeVRML(colIndex, meshes, f.filename, f.scale, f.decplc, f.zforward)
+    return
+
+
+# Clear previous messages
+mw=Gui.getMainWindow()
+r=mw.findChild(QtGui.QTextEdit, "Report view")
+r.clear()
+
+doc = FreeCAD.ActiveDocument
+if doc!=None:
+
+    sel = FreeCADGui.Selection.getSelection()
+    if not sel:
+        FreeCAD.Console.PrintWarning("Select something first!\n\n")
+        msg="Export VRML from FreeCAD is a python macro that will export simplified VRML of "
+        msg+="a (multi)selected Part or fused Part to VRML optimized to Kicad and compatible with Blender. "
+        msg+="The size of VRML is much smaller compared to the one exported from FC Gui "
+        msg+="and the loading/rendering time is also smaller\n"
+        msg+="Change mesh deviation to increase quality of VRML"
+        say(msg)
+    else:
+        selectObjs = []
+        for obj in sel:
+            obj.Shape.tessellate(dflt_deviation,True)  # Must tessellate at object level
+            selectObjs.append(obj)
+
+        filePathName=doc.FileName
+        if filePathName=="":
+            say('Path not found, saving to '+dflt_path)
+            filePathName = dflt_path
+        else:
+            filePathName = os.path.dirname(os.path.abspath(filePathName))
+        filePathName = filePathName + os.sep + doc.Label + '-' + selectObjs[0].Label
+
+        outputFiles = [ FileParam(scale=1.0000, decplc=4, zforward=False, filename=filePathName+'.wrl'),
+                        FileParam(scale=0.3937, decplc=5, zforward=False, filename=filePathName+'_inches.wrl'),
+                        FileParam(scale=1.0000, decplc=4, zforward=True,  filename=filePathName+'_ZY.wrl') ]
+
+        export(selectObjs, outputFiles)
